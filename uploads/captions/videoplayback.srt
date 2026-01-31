@@ -1,0 +1,12 @@
+1
+00:00:00,000 --> 00:00:05,000
+Hi, I'm Sarah. Nice to meet you.
+
+2
+00:00:05,000 --> 00:00:10,000
+Hi, Sarah, I'm John. Nice to meet you, too.
+
+3
+00:00:10,000 --> 00:00:16,000
+Are you new here, or have you been in town for a while?
+
