@@ -1,71 +1,182 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+const fs = require("fs");
+const ffmpeg = require("fluent-ffmpeg");
+const { exec } = require("child_process");
 
 const router = express.Router();
 
-/* Storage configuration */
+/* ---------------- MULTER SETUP ---------------- */
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
+  destination: function (req, file, cb) {
+    const uploadPath = path.join(__dirname, "../uploads");
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
   },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + "-" + file.originalname);
-  }
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  },
 });
 
-/* File filter: Video-only */
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith("video/")) {
-    cb(null, true);
-  } else {
-    cb(new Error("Only video files are allowed"), false);
-  }
-};
+const upload = multer({ storage });
 
-/* Multer config with FILE SIZE LIMIT (50MB) */
-const upload = multer({
-  storage: storage,
-  fileFilter: fileFilter,
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50 MB
-  }
-});
+/* ---------------- FORMAT TIME ---------------- */
 
-/* Upload route */
-router.post("/", upload.single("video"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: "No file uploaded" });
-  }
+function formatTime(seconds) {
+  const hrs = String(Math.floor(seconds / 3600)).padStart(2, "0");
+  const mins = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+  const secs = String(Math.floor(seconds % 60)).padStart(2, "0");
+  const ms = String(Math.floor((seconds % 1) * 1000)).padStart(3, "0");
+  return `${hrs}:${mins}:${secs},${ms}`;
+}
 
-  res.status(200).json({
-    message: "Upload successful",
-    file: req.file.filename
+/* ---------------- WHISPER TRANSCRIBE ---------------- */
+
+function transcribeAudio(audioPath) {
+  return new Promise((resolve, reject) => {
+    const outputDir = path.join(__dirname, "../temp");
+
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    const command = `python -m whisper "${audioPath}" --model base --output_dir "${outputDir}" --output_format json`;
+
+    exec(command, (error) => {
+      if (error) return reject(error);
+
+      const fileName = path.basename(audioPath, ".wav") + ".json";
+      const transcriptPath = path.join(outputDir, fileName);
+
+      if (!fs.existsSync(transcriptPath))
+        return reject("Transcript JSON not found");
+
+      const transcriptJSON = JSON.parse(
+        fs.readFileSync(transcriptPath, "utf-8")
+      );
+
+      resolve(transcriptJSON);
+    });
   });
+}
+
+/* ---------------- GENERATE SRT ---------------- */
+
+function generateSRT(whisperData) {
+  let srt = "";
+  let index = 1;
+
+  whisperData.segments.forEach((segment) => {
+    srt += `${index}\n`;
+    srt += `${formatTime(segment.start)} --> ${formatTime(segment.end)}\n`;
+    srt += `${segment.text.trim()}\n\n`;
+    index++;
+  });
+
+  return srt;
+}
+
+/* ---------------- BURN SUBTITLE (WINDOWS FIXED) ---------------- */
+
+function burnStyledSubtitle(videoPath, srtPath, outputPath) {
+  return new Promise((resolve, reject) => {
+
+    // Convert to forward slashes
+    let safeVideoPath = videoPath.replace(/\\/g, "/");
+    let safeSrtPath = srtPath.replace(/\\/g, "/");
+    let safeOutputPath = outputPath.replace(/\\/g, "/");
+
+    // Escape drive letter colon for ffmpeg
+    safeSrtPath = safeSrtPath.replace("C:/", "C\\\\:/");
+
+    ffmpeg(safeVideoPath)
+      .outputOptions([
+        "-vf",
+        `subtitles=${safeSrtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Alignment=2'`,
+        "-c:v libx264",
+        "-preset ultrafast",
+        "-c:a copy"
+      ])
+      .save(safeOutputPath)
+      .on("end", () => {
+        console.log("Subtitles burned successfully");
+        resolve();
+      })
+      .on("error", (err) => {
+        console.error("FFmpeg Burn Error:", err);
+        reject(err);
+      });
+  });
+}
+
+/* ---------------- MAIN ROUTE ---------------- */
+
+router.post("/", upload.single("video"), async (req, res) => {
+  try {
+    if (!req.file)
+      return res.status(400).json({ error: "No video uploaded" });
+
+    const videoPath = req.file.path;
+    const baseName = path.basename(videoPath, path.extname(videoPath));
+
+    /* ---------- AUDIO EXTRACTION ---------- */
+
+    const audioDir = path.join(__dirname, "../audio");
+    if (!fs.existsSync(audioDir))
+      fs.mkdirSync(audioDir, { recursive: true });
+
+    const audioPath = path.join(audioDir, Date.now() + ".wav");
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .noVideo()
+        .audioCodec("pcm_s16le")
+        .format("wav")
+        .save(audioPath)
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    /* ---------- WHISPER ---------- */
+
+    const whisperJSON = await transcribeAudio(audioPath);
+
+    /* ---------- GENERATE SRT ---------- */
+
+    const srtDir = path.join(__dirname, "../captions");
+    if (!fs.existsSync(srtDir))
+      fs.mkdirSync(srtDir, { recursive: true });
+
+    const srtPath = path.join(srtDir, baseName + ".srt");
+
+    const srtContent = generateSRT(whisperJSON);
+    fs.writeFileSync(srtPath, srtContent);
+
+    /* ---------- BURN SUBTITLE ---------- */
+
+    const finalDir = path.join(__dirname, "../final");
+    if (!fs.existsSync(finalDir))
+      fs.mkdirSync(finalDir, { recursive: true });
+
+    const outputVideoPath = path.join(
+      finalDir,
+      baseName + "_captioned.mp4"
+    );
+
+    await burnStyledSubtitle(videoPath, srtPath, outputVideoPath);
+
+    /* ---------- DOWNLOAD FINAL VIDEO ---------- */
+
+    res.download(outputVideoPath);
+
+  } catch (err) {
+    console.error("Processing failed:", err);
+    res.status(500).json({ error: "Processing failed" });
+  }
 });
 
-/* Error handler for Multer */
-router.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ message: err.message });
-  } else if (err) {
-    return res.status(400).json({ message: err.message });
-  }
-  next();
-});
 module.exports = router;
-// Get all uploaded videos
-router.get("/videos", async (req, res) => {
-  try {
-    const videos = await Video.find().sort({ uploadedAt: -1 });
-    res.json({
-      count: videos.length,
-      videos
-    });
-  } catch (err) {
-    res.status(500).json({
-      message: "Failed to fetch videos",
-      error: err.message
-    });
-  }
-});

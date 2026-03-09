@@ -1,0 +1,5 @@
+This is how you add a voiceover to screen recordings.
+Long hold the screen record button.
+Click on microphone.
+Click on start recording.
+Now you can add voiceover.

@@ -1,0 +1,20 @@
+1
+00:00:00,000 --> 00:00:02,480
+This is how you add a voiceover to screen recordings.
+
+2
+00:00:02,480 --> 00:00:04,240
+Long hold the screen record button.
+
+3
+00:00:04,240 --> 00:00:05,679
+Click on microphone.
+
+4
+00:00:05,679 --> 00:00:07,200
+Click on start recording.
+
+5
+00:00:07,200 --> 00:00:09,120
+Now you can add voiceover.
+
